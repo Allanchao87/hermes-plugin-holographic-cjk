@@ -1,0 +1,13 @@
+[project]
+name = "hermes-plugin-holographic-zh"
+version = "0.1.0"
+description = "Hermes Agent local holographic memory provider with CJK bigram retrieval"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26,<3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]
