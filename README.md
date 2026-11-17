@@ -47,6 +47,7 @@ Hermes 内置的 `holographic` 记忆 provider 把事实（fact）存在 SQLite 
 - 旧数据库透明迁移（首次打开自动补列、回填 bigram、重建 FTS）
 - `update_fact` 局部更新安全（tags-only / content-only / trust-only）
 - `retrieval_count` 真实自增
+- **分级时效衰减（0.2.0）**：按事实的 T 级标签做逐条时间衰减（如 `T0`事件永不衰减、`T3`快变 60 天半衰期），支持 `facts.ttl_days` 逐条覆盖；检索强化让常被召回的事实衰减更慢
 - numpy 缺席时 HRR 向量层自动降级（权重重分配），中文关键词检索不受影响
 - 纯本地：不调 embedding API、零出网调用
 
@@ -93,9 +94,19 @@ hermes plugins enable holographic-zh
 | `auto_extract` | `false` | 会话结束时自动抽取事实 |
 | `default_trust` | `0.5` | 新事实初始信任分 |
 | `min_trust_threshold` | `0.3` | 检索的最低信任过滤 |
-| `temporal_decay_half_life` | `0` | 时间衰减半衰期（天），0 = 不衰减 |
+| `temporal_decay_half_life` | `0` | 全局兜底衰减半衰期（天），仅对无 T 级标签的事实生效，0 = 不衰减 |
+| `ttl_map` | `{}` | 逐条衰减半衰期映射，按事实 tags 里的 T 级 token 取值，JSON：`{"T0":0,"T1":0,"T2":180,"T3":60}`（0 = 永不衰减）。例：`hermes config set plugins.hermes-memory-store.ttl_map '{"T0":0,"T1":0,"T2":180,"T3":60}' --force` |
+| `temporal_reinforcement` | `true` | 检索强化：有效半衰期随 `retrieval_count` 拉长（× (1 + 0.5·min(命中数, 4))），常被召回的事实衰减更慢 |
 | `hrr_dim` | `1024` | HRR 向量维度 |
 | `hrr_weight` | `0.3` | HRR 相似度权重（numpy 缺席时自动重分配） |
+
+### 分级时效衰减用法（0.2.0）
+
+写事实时在 tags 里带时效等级：`T0` 事件型（永不失效，如清退/裁定/会晤结论）、`T1` 结构型（工具命令/表结构/口径，不衰减）、`T2` 慢变（组织人事/账期/供应格局）、`T3` 快变（行情/产能/价格快照）。配合 `ttl_map` 配置后：
+
+- 衰减只降排序权重，**不删除**——过时事实仍可检索，只是不再顶替新快照注入
+- `facts.ttl_days` 列可对单条事实显式覆盖（如某条 T3 状态约定 7 天有效期）
+- 事件/状态混合的事实建议拆两条：事件型记录事实、状态型记录当前快照（新快照 add 不覆盖，形成时间线）
 
 ## 运行测试
 

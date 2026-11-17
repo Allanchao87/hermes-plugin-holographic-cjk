@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from . import holographic as hrr
 from .cjk_tokenize import tokenize_for_index
 
-_FACT_COLUMNS = "fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at"
+_FACT_COLUMNS = "fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, ttl_days, created_at, updated_at"
 _ROLE_ENTITY, _ROLE_CONTENT = hrr.ROLE_ENTITY, hrr.ROLE_CONTENT
 _PUNCT = ".,;:!?\"'()[]{}#@<>"
 _FTS_OPERATORS = str.maketrans("", "", '"()*^:-+')
@@ -38,8 +38,13 @@ class FactRetriever:
     """Multi-strategy fact retrieval with trust-weighted scoring."""
 
     def __init__(self, store: MemoryStore, temporal_decay_half_life: int = 0,  # days, 0 = disabled
+                 ttl_map: dict | None = None, temporal_reinforcement: bool = True,
                  fts_weight: float = 0.4, jaccard_weight: float = 0.3, hrr_weight: float = 0.3, hrr_dim: int = 1024):
         self.store, self.half_life, self.hrr_dim = store, temporal_decay_half_life, hrr_dim
+        # Per-fact decay half-lives keyed by a T-level token in facts.tags, e.g.
+        # {"T0": 0, "T1": 0, "T2": 180, "T3": 60} (0 = timeless, never decays).
+        self.ttl_map = dict(ttl_map or {})
+        self.reinforcement = temporal_reinforcement
         if hrr_weight > 0 and not hrr._HAS_NUMPY:  # redistribute weights without numpy
             fts_weight, jaccard_weight, hrr_weight = 0.6, 0.4, 0.0
         self.fts_weight, self.jaccard_weight, self.hrr_weight = fts_weight, jaccard_weight, hrr_weight
@@ -51,9 +56,11 @@ class FactRetriever:
         return hrr.bytes_to_phases(blob, dim=self.hrr_dim)
 
     def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
-        """FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting → optional temporal decay
-        0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc. retrieval_count
-        is incremented for the surfaced ids (via store.record_retrieval)."""
+        """FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting → per-fact temporal decay
+        0.5^(age_days / ttl). The ttl resolves per fact: explicit facts.ttl_days override > a T-level
+        tag mapped through ttl_map > the global half_life (0 = decay disabled). Returns fact dicts
+        with 'score', sorted desc. retrieval_count is incremented for the surfaced ids (via
+        store.record_retrieval)."""
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
         query_tokens = self._tokenize(query)
         # Query vector is loop-invariant; encode lazily on the first candidate that carries an HRR vector
@@ -69,8 +76,9 @@ class FactRetriever:
                 hrr_sim = _shift(hrr.similarity(query_vec, fact_vec))
             relevance = self.fts_weight * fact.get("fts_rank", 0.0) + self.jaccard_weight * jaccard + self.hrr_weight * hrr_sim
             fact["score"] = relevance * fact["trust_score"]
-            if self.half_life > 0:
-                fact["score"] *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
+            ttl = self._fact_ttl(fact)
+            if ttl > 0:
+                fact["score"] *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"), ttl)
         results = sorted(candidates, key=lambda x: x["score"], reverse=True)[:limit]
         for fact in results:
             fact.pop("hrr_vector", None)  # callers expect JSON-serializable dicts
@@ -222,13 +230,33 @@ class FactRetriever:
         """Jaccard similarity coefficient: |A ∩ B| / |A ∪ B|."""
         return len(set_a & set_b) / len(set_a | set_b) if set_a and set_b else 0.0
 
-    def _temporal_decay(self, timestamp_str: str | None) -> float:
+    def _fact_ttl(self, fact: dict) -> int:
+        """Per-fact decay half-life in days: explicit facts.ttl_days override > a T-level token
+        in tags mapped through ttl_map > the global half_life (0 = decay disabled). A T-level
+        mapped to 0 (T0/T1 timeless) or absent from ttl_map never decays. With reinforcement on,
+        the effective half-life stretches with retrieval_count: × (1 + 0.5·min(hits, 4)) —
+        frequently recalled facts fade slower."""
+        ttl = fact.get("ttl_days") or 0
+        if not ttl:
+            for token in (fact.get("tags") or "").split():
+                if token in self.ttl_map:
+                    ttl = self.ttl_map[token]
+                    break
+        if not ttl:
+            ttl = self.half_life
+        ttl = int(ttl)
+        if ttl > 0 and self.reinforcement:
+            hits = int(fact.get("retrieval_count") or 0)
+            ttl = int(ttl * (1 + 0.5 * min(hits, 4)))
+        return ttl
+
+    def _temporal_decay(self, timestamp_str: str | None, half_life: int) -> float:
         """0.5^(age_days / half_life); 1.0 if disabled, missing, unparseable, or in the future."""
-        if not self.half_life or not timestamp_str:
+        if not half_life or not timestamp_str:
             return 1.0
         try:
             ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")) if isinstance(timestamp_str, str) else timestamp_str
             age_days = (datetime.now(timezone.utc) - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds() / 86400
-            return 1.0 if age_days < 0 else math.pow(0.5, age_days / self.half_life)
+            return 1.0 if age_days < 0 else math.pow(0.5, age_days / half_life)
         except (ValueError, TypeError):
             return 1.0

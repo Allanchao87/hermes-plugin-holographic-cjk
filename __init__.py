@@ -2,7 +2,7 @@
 resolution, trust scoring, and HRR-based compositional retrieval. Original plugin by dusterbloom (PR #2351).
 Config in $HERMES_HOME/config.yaml under plugins.hermes-memory-store: db_path ($HERMES_HOME/memory_store.db),
 auto_extract (false), default_trust (0.5), min_trust_threshold (0.3), temporal_decay_half_life (0),
-hrr_dim (1024), hrr_weight (0.3)."""
+ttl_map ({}), temporal_reinforcement (true), hrr_dim (1024), hrr_weight (0.3)."""
 
 from __future__ import annotations
 
@@ -134,6 +134,9 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "temporal_decay_half_life", "description": "Fallback decay half-life in days for facts without a mapped T-level tag; 0 = disabled", "default": "0"},
+            {"key": "ttl_map", "description": "Per-fact decay half-lives keyed by a T-level tag token, JSON: {\"T0\":0,\"T1\":0,\"T2\":180,\"T3\":60} (0 = timeless)", "default": "{}"},
+            {"key": "temporal_reinforcement", "description": "Stretch a fact's half-life with retrieval_count (frequently recalled facts decay slower)", "default": "true", "choices": ["true", "false"]},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -143,9 +146,17 @@ class HolographicMemoryProvider(MemoryProvider):
         if isinstance(db_path, str):  # expand $HERMES_HOME so paths resolve to the active profile
             db_path = db_path.replace("$HERMES_HOME", _hermes_home).replace("${HERMES_HOME}", _hermes_home)
         hrr_dim = int(self._config.get("hrr_dim", 1024))
+        ttl_map = self._config.get("ttl_map", "{}")
+        try:
+            ttl_map = json.loads(ttl_map) if isinstance(ttl_map, str) else ttl_map
+        except (ValueError, TypeError):
+            logger.warning("Invalid ttl_map config (expected JSON object), ignoring: %r", ttl_map)
+            ttl_map = {}
         self._store = MemoryStore(db_path=db_path, default_trust=float(self._config.get("default_trust", 0.5)), hrr_dim=hrr_dim)
         self._retriever = FactRetriever(store=self._store, hrr_dim=hrr_dim, hrr_weight=float(self._config.get("hrr_weight", 0.3)),
-                                        temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)))
+                                        temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)),
+                                        ttl_map=ttl_map or None,
+                                        temporal_reinforcement=is_truthy_value(self._config.get("temporal_reinforcement", "true")))
         self._session_id = session_id
 
     def system_prompt_block(self) -> str:

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS facts (
     trust_score     REAL DEFAULT 0.5,
     retrieval_count INTEGER DEFAULT 0,
     helpful_count   INTEGER DEFAULT 0,
+    ttl_days        INTEGER,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     hrr_vector      BLOB
@@ -133,6 +134,9 @@ class MemoryStore:
         if columns and "hrr_vector" not in columns:  # pre-HRR DB: table exists, column missing
             from hermes_cli.sqlite_util import add_column_if_missing
             add_column_if_missing(self._conn, "facts", "hrr_vector", "hrr_vector BLOB")
+        if columns and "ttl_days" not in columns:  # pre-P1 DB: explicit per-fact decay override column
+            from hermes_cli.sqlite_util import add_column_if_missing
+            add_column_if_missing(self._conn, "facts", "ttl_days", "ttl_days INTEGER")
         self._conn.executescript(_SCHEMA)  # creates everything on a fresh DB; no-ops otherwise
         # Pre-search_text DBs: the FTS table exists with (content, tags) only. Rebuild it
         # with the extra column, backfill bigrams, and let triggers keep it current after.

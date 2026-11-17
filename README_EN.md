@@ -47,6 +47,7 @@ Additionally, the `retrieval_count` column was declared but never written upstre
 - Transparent migration of pre-CJK databases (auto add column, backfill bigrams, rebuild FTS on first open)
 - Safe partial updates (`update_fact` with tags-only / content-only / trust-only)
 - Real `retrieval_count` accounting
+- **Tiered temporal decay (0.2.0)**: per-fact decay half-life keyed by a T-level tag (e.g. `T0` event = never, `T3` fast-moving = 60-day half-life), with an explicit `facts.ttl_days` per-row override and retrieval reinforcement that stretches the half-life of frequently recalled facts
 - Graceful degradation without numpy (HRR layer disables itself, weights redistribute, CJK keyword retrieval unaffected)
 - Local-only: no embedding API, zero outbound network calls
 
@@ -93,9 +94,19 @@ The `plugins.hermes-memory-store` section of `$HERMES_HOME/config.yaml`:
 | `auto_extract` | `false` | auto-extract facts at session end |
 | `default_trust` | `0.5` | initial trust score of new facts |
 | `min_trust_threshold` | `0.3` | minimum-trust retrieval filter |
-| `temporal_decay_half_life` | `0` | temporal decay half-life (days), 0 = disabled |
+| `temporal_decay_half_life` | `0` | global fallback decay half-life (days), applies only to facts with no T-level tag; 0 = disabled |
+| `ttl_map` | `{}` | per-fact decay half-lives keyed by a T-level token in fact tags, JSON: `{"T0":0,"T1":0,"T2":180,"T3":60}` (0 = timeless). Example: `hermes config set plugins.hermes-memory-store.ttl_map '{"T0":0,"T1":0,"T2":180,"T3":60}' --force` |
+| `temporal_reinforcement` | `true` | retrieval reinforcement: effective half-life stretches with `retrieval_count` (× (1 + 0.5·min(hits, 4))) — frequently recalled facts fade slower |
 | `hrr_dim` | `1024` | HRR vector dimensions |
 | `hrr_weight` | `0.3` | HRR similarity weight (redistributed automatically when numpy is absent) |
+
+### Tiered temporal decay usage (0.2.0)
+
+Tag facts with a temporal level when writing them: `T0` event (never expires — exits, rulings, meeting outcomes), `T1` structural (tool commands, table schemas, conventions), `T2` slow-moving (org charts, payment terms, supply landscape), `T3` fast-moving (market conditions, capacity, price snapshots). With `ttl_map` configured:
+
+- decay only lowers ranking weight, it **never deletes** — stale facts stay retrievable, they just stop outranking fresh snapshots
+- the `facts.ttl_days` column overrides the tag-derived half-life per row (e.g. a T3 status valid for exactly 7 days)
+- for mixed event/state facts, split into two: the event (T0) records what happened, the state (T3) snapshots the current picture; add new snapshots instead of overwriting to build a timeline
 
 ## Running the tests
 
