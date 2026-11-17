@@ -1,6 +1,6 @@
 [project]
 name = "hermes-plugin-holographic-zh"
-version = "0.2.0"
+version = "0.3.0"
 description = "Hermes Agent local holographic memory provider with CJK bigram retrieval"
 requires-python = ">=3.11"
 license = { text = "MIT" }

@@ -48,6 +48,7 @@ Hermes 内置的 `holographic` 记忆 provider 把事实（fact）存在 SQLite 
 - `update_fact` 局部更新安全（tags-only / content-only / trust-only）
 - `retrieval_count` 真实自增
 - **分级时效衰减（0.2.0）**：按事实的 T 级标签做逐条时间衰减（如 `T0`事件永不衰减、`T3`快变 60 天半衰期），支持 `facts.ttl_days` 逐条覆盖；检索强化让常被召回的事实衰减更慢
+- **版本链（0.3.0）**：`supersede` 退役过时事实（保留历史 + 死亡笔记），检索自动排除已退役条目；`timeline` 重建同主题完整版本链（旧→新），历史轨迹变成可查证据
 - numpy 缺席时 HRR 向量层自动降级（权重重分配），中文关键词检索不受影响
 - 纯本地：不调 embedding API、零出网调用
 
@@ -107,6 +108,23 @@ hermes plugins enable holographic-zh
 - 衰减只降排序权重，**不删除**——过时事实仍可检索，只是不再顶替新快照注入
 - `facts.ttl_days` 列可对单条事实显式覆盖（如某条 T3 状态约定 7 天有效期）
 - 事件/状态混合的事实建议拆两条：事件型记录事实、状态型记录当前快照（新快照 add 不覆盖，形成时间线）
+
+### 版本链：supersede / timeline（0.3.0）
+
+快变事实更新时的标准流程是「新增快照 + 退役旧快照」，不覆盖、不删除：
+
+```
+fact_store(action='add', content='澳弘价格快照（2026-12）：双面板 760 元/㎡ …', tags='澳弘 价格 T3')
+  → fact_id=90
+fact_store(action='supersede', fact_id=79, by_fact_id=90, reason='2026-12 调价，两个月一调到期')
+  → #79 打上 valid_until + superseded_by=90 + reason，检索不再返回，历史保留
+fact_store(action='timeline', fact_id=79)
+  → 完整链：#79（已退役，2026-10-16 口径）→ #90（现行）+ 各自 reason
+```
+
+- `valid_until` 记录事实在现实世界失效的时刻（可显式传，默认当前 UTC），与 `updated_at`（系统时间）分开——双时间线
+- 检索/注入默认排除已退役条目：旧快照不会顶替新快照，但 `timeline` 随时可查完整轨迹
+- 守卫：不自指、不重复打标（链保持线性）、不能用已退役事实做替代者
 
 ## 运行测试
 

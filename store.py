@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS facts (
     retrieval_count INTEGER DEFAULT 0,
     helpful_count   INTEGER DEFAULT 0,
     ttl_days        INTEGER,
+    valid_until     TEXT,
+    superseded_by   INTEGER REFERENCES facts(fact_id),
+    superseded_reason TEXT,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     hrr_vector      BLOB
@@ -137,6 +140,11 @@ class MemoryStore:
         if columns and "ttl_days" not in columns:  # pre-P1 DB: explicit per-fact decay override column
             from hermes_cli.sqlite_util import add_column_if_missing
             add_column_if_missing(self._conn, "facts", "ttl_days", "ttl_days INTEGER")
+        if columns and "superseded_by" not in columns:  # pre-P2 DB: version-chain death-note columns
+            from hermes_cli.sqlite_util import add_column_if_missing
+            add_column_if_missing(self._conn, "facts", "valid_until", "valid_until TEXT")
+            add_column_if_missing(self._conn, "facts", "superseded_by", "superseded_by INTEGER")
+            add_column_if_missing(self._conn, "facts", "superseded_reason", "superseded_reason TEXT")
         self._conn.executescript(_SCHEMA)  # creates everything on a fresh DB; no-ops otherwise
         # Pre-search_text DBs: the FTS table exists with (content, tags) only. Rebuild it
         # with the extra column, backfill bigrams, and let triggers keep it current after.
@@ -228,6 +236,67 @@ class MemoryStore:
             self._write("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._rebuild_bank(row["category"])
             return True
+
+    def supersede(self, fact_id: int, by_fact_id: int, reason: str = "", valid_until: str | None = None) -> bool:
+        """Retire fact_id in favour of by_fact_id: sets valid_until (real-world end of truth,
+        defaults to now UTC) + superseded_by + superseded_reason (death note). The old fact is
+        NEVER deleted — retrieval stops surfacing it, timeline() still shows the full chain.
+        Guards: both ids must exist, no self-reference, no re-marking (a fact already superseded
+        keeps its first successor — chains stay linear), and the successor must itself be live."""
+        if fact_id == by_fact_id:
+            raise ValueError("a fact cannot supersede itself")
+        with self._lock:
+            old = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (fact_id,))
+            new = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (by_fact_id,))
+            if old is None or new is None:
+                raise ValueError(f"unknown fact_id: {fact_id if old is None else by_fact_id}")
+            if old["superseded_by"] is not None:
+                raise ValueError(f"fact {fact_id} is already superseded by {old['superseded_by']}; chains stay linear")
+            if new["superseded_by"] is not None:
+                raise ValueError(f"fact {by_fact_id} is itself superseded by {new['superseded_by']}; supersede with the chain head instead")
+            if valid_until is None:
+                from datetime import datetime, timezone
+                valid_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self._write("UPDATE facts SET valid_until = ?, superseded_by = ?, superseded_reason = ? WHERE fact_id = ?",
+                        (valid_until, by_fact_id, reason or "", fact_id))
+            return True
+
+    def timeline(self, fact_id: int) -> dict:
+        """Full version chain containing fact_id, oldest → newest. Each entry is the public fact
+        dict plus chain position; live head carries superseded_by=None. Cycle-safe (visited set)."""
+        with self._lock:
+            chain_ids: list[int] = [fact_id]
+            # Walk forward to the live head
+            seen = {fact_id}
+            cur = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (fact_id,))
+            if cur is None:
+                raise ValueError(f"unknown fact_id: {fact_id}")
+            while cur["superseded_by"] is not None:
+                nxt = cur["superseded_by"]
+                if nxt in seen:
+                    raise ValueError("supersede cycle detected")
+                seen.add(nxt)
+                chain_ids.append(nxt)
+                cur = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (nxt,))
+            # Walk backward from fact_id collecting predecessors (full scan is fine at store scale)
+            frontier = {fact_id}
+            while frontier:
+                placeholders = ",".join("?" * len(frontier))
+                preds = self._conn.execute(
+                    f"SELECT fact_id FROM facts WHERE superseded_by IN ({placeholders})", sorted(frontier)).fetchall()
+                frontier = {r["fact_id"] for r in preds} - seen
+                seen |= frontier
+                chain_ids = sorted(frontier) + chain_ids
+            facts = []
+            for i, fid in enumerate(chain_ids):
+                row = self._one("SELECT fact_id, content, category, tags, trust_score, retrieval_count, "
+                                "helpful_count, ttl_days, valid_until, superseded_by, superseded_reason, "
+                                "created_at, updated_at FROM facts WHERE fact_id = ?", (fid,))
+                f = dict(row)
+                f["chain_position"] = i + 1
+                f["is_live"] = f["superseded_by"] is None
+                facts.append(f)
+            return {"fact_id": fact_id, "chain_length": len(facts), "chain": facts}
 
     def list_facts(self, category: str | None = None, min_trust: float = 0.0, limit: int = 50) -> list[dict]:
         """Browse facts ordered by trust_score descending, optionally filtered by category / min trust."""

@@ -172,9 +172,12 @@ class FactRetriever:
                     })
         return sorted(contradictions, key=lambda x: x["contradiction_score"], reverse=True)[:limit]
 
-    def _vector_rows(self, category: str | None, columns: str = _FACT_COLUMNS + ", hrr_vector") -> list:
-        """All facts that carry an HRR vector, optionally filtered by category."""
-        where = "WHERE hrr_vector IS NOT NULL" + (" AND category = ?" if category else "")
+    def _vector_rows(self, category: str | None, columns: str = _FACT_COLUMNS + ", hrr_vector") -> list[dict]:
+        """All live facts that carry an HRR vector, optionally filtered by category.
+        Superseded facts are excluded (probe/related/reason/contradict describe the present,
+        not history — a superseded snapshot is not a live claim, and new/old snapshots of the
+        same subject would otherwise flood contradict() with false positives)."""
+        where = "WHERE hrr_vector IS NOT NULL AND superseded_by IS NULL" + (" AND category = ?" if category else "")
         return self.store._conn.execute(f"SELECT {columns} FROM facts {where}", [category] if category else []).fetchall()
 
     def _rank_by_vector(self, rows: list, sim_fn: Callable[[dict, object], float], limit: int) -> list[dict]:
@@ -185,11 +188,13 @@ class FactRetriever:
         return sorted(scored, key=lambda x: x["score"], reverse=True)[:limit]
 
     def _fts_candidates(self, query: str, category: str | None, min_trust: float, limit: int) -> list[dict]:
-        """Raw FTS5 MATCH candidates with rank normalized to [0, 1] as 'fts_rank'."""
+        """Raw FTS5 MATCH candidates with rank normalized to [0, 1] as 'fts_rank'. Superseded
+        facts are excluded from live retrieval (timeline() is the explicit history view)."""
         category_clause = "AND f.category = ? " if category else ""
         params = [self._sanitize_fts_query(query)] + ([category] if category else []) + [min_trust, limit]
         sql = ("SELECT f.*, facts_fts.rank as fts_rank_raw FROM facts_fts JOIN facts f ON f.fact_id = facts_fts.rowid "
-               f"WHERE facts_fts MATCH ? {category_clause}AND f.trust_score >= ? ORDER BY facts_fts.rank LIMIT ?")
+               f"WHERE facts_fts MATCH ? {category_clause}AND f.trust_score >= ? "
+               "AND f.superseded_by IS NULL ORDER BY facts_fts.rank LIMIT ?")
         try:
             results = [dict(row) for row in self.store._conn.execute(sql, params).fetchall()]
         except Exception:

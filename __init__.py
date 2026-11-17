@@ -34,18 +34,23 @@ FACT_STORE_SCHEMA = {
         "• add — Store a fact the user would expect you to remember.\n• search — Keyword lookup ('editor config', 'deploy process').\n"
         "• probe — Entity recall: ALL facts about a person/thing.\n• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
+        "• supersede — Retire an outdated fact in favour of its replacement (old fact kept as history; retrieval stops surfacing it). Use for time-sensitive facts: ADD the new snapshot first, then supersede(old, new, reason).\n"
+        "• timeline — Version chain of a fact (oldest → newest, with supersede reasons) — how a subject changed over time.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"]},
+            "action": {"type": "string", "enum": ["add", "search", "probe", "related", "reason", "supersede", "timeline", "contradict", "update", "remove", "list"]},
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
-            "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
+            "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'/'timeline'."},
+            "by_fact_id": {"type": "integer", "description": "Successor fact ID for 'supersede'."},
+            "reason": {"type": "string", "description": "Supersede reason (death note) for 'supersede'."},
+            "valid_until": {"type": "string", "description": "Real-world end of truth for 'supersede' (ISO datetime; default: now UTC)."},
             "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
@@ -237,6 +242,10 @@ class HolographicMemoryProvider(MemoryProvider):
             "reason": lambda self, a: _results(self._retriever.reason(a["entities"], category=a.get("category"), limit=_limit(a)))
             if a.get("entities") else tool_error("reason requires 'entities' list"),
             "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
+            "supersede": lambda self, a: json.dumps({"superseded": self._store.supersede(
+                int(a["fact_id"]), int(a["by_fact_id"]), reason=a.get("reason", ""),
+                valid_until=a.get("valid_until")), "fact_id": int(a["fact_id"]), "by_fact_id": int(a["by_fact_id"])}),
+            "timeline": lambda self, a: json.dumps(self._store.timeline(int(a["fact_id"])), ensure_ascii=False),
             "update": lambda self, a: json.dumps({"updated": self._store.update_fact(
                 int(a["fact_id"]), content=a.get("content"), trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
                 tags=a.get("tags"), category=a.get("category"))}),

@@ -48,6 +48,7 @@ Additionally, the `retrieval_count` column was declared but never written upstre
 - Safe partial updates (`update_fact` with tags-only / content-only / trust-only)
 - Real `retrieval_count` accounting
 - **Tiered temporal decay (0.2.0)**: per-fact decay half-life keyed by a T-level tag (e.g. `T0` event = never, `T3` fast-moving = 60-day half-life), with an explicit `facts.ttl_days` per-row override and retrieval reinforcement that stretches the half-life of frequently recalled facts
+- **Version chains (0.3.0)**: `supersede` retires an outdated fact in favour of its replacement (kept as history with a death note) and retrieval stops surfacing it; `timeline` rebuilds the full chain oldest → newest so the history of a subject stays queryable evidence
 - Graceful degradation without numpy (HRR layer disables itself, weights redistribute, CJK keyword retrieval unaffected)
 - Local-only: no embedding API, zero outbound network calls
 
@@ -107,6 +108,23 @@ Tag facts with a temporal level when writing them: `T0` event (never expires —
 - decay only lowers ranking weight, it **never deletes** — stale facts stay retrievable, they just stop outranking fresh snapshots
 - the `facts.ttl_days` column overrides the tag-derived half-life per row (e.g. a T3 status valid for exactly 7 days)
 - for mixed event/state facts, split into two: the event (T0) records what happened, the state (T3) snapshots the current picture; add new snapshots instead of overwriting to build a timeline
+
+### Version chains: supersede / timeline (0.3.0)
+
+The standard update flow for fast-moving facts is "add the new snapshot, then retire the old one" — never overwrite, never delete:
+
+```
+fact_store(action='add', content='Aohong price snapshot (2026-12): 2-layer 760 CNY/m² …', tags='Aohong price T3')
+  -> fact_id=90
+fact_store(action='supersede', fact_id=79, by_fact_id=90, reason='Dec-2026 repricing, bimonthly cycle expired')
+  -> #79 gains valid_until + superseded_by=90 + reason; retrieval stops returning it, history kept
+fact_store(action='timeline', fact_id=79)
+  -> full chain: #79 (retired, Oct-2026 terms) -> #90 (current) with each reason
+```
+
+- `valid_until` records when the fact stopped being true in the real world (explicit or now UTC), separate from `updated_at` (system time) — a bi-temporal pair
+- live retrieval and auto-injection exclude retired entries: an old snapshot never outranks its replacement, but `timeline` always shows the full trail
+- guards: no self-supersede, no re-marking (chains stay linear), a retired fact cannot serve as a successor
 
 ## Running the tests
 
