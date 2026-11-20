@@ -181,16 +181,17 @@ class MemoryStore:
         self._conn.commit()
         return cur
 
-    def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
+    def add_fact(self, content: str, category: str = "general", tags: str = "", ttl_days: int | None = None) -> int:
         """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the existing fact_id untouched.
-        Links extracted entities and rebuilds the category bank."""
+        Links extracted entities and rebuilds the category bank. ttl_days: optional explicit decay
+        half-life override (None = derive from a T-level tag / global config at retrieval time)."""
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
             try:
-                fact_id: int = self._write("INSERT INTO facts (content, category, tags, search_text, trust_score) VALUES (?, ?, ?, ?, ?)",
-                                           (content, category, tags, build_search_text(content, tags), self.default_trust)).lastrowid  # type: ignore[assignment]
+                fact_id: int = self._write("INSERT INTO facts (content, category, tags, search_text, ttl_days, trust_score) VALUES (?, ?, ?, ?, ?, ?)",
+                                           (content, category, tags, build_search_text(content, tags), ttl_days, self.default_trust)).lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
                 return int(self._one("SELECT fact_id FROM facts WHERE content = ?", (content,))["fact_id"])
             self._link_entities(fact_id, content)
@@ -199,8 +200,10 @@ class MemoryStore:
             return fact_id
 
     def update_fact(self, fact_id: int, content: str | None = None, trust_delta: float | None = None,
-                    tags: str | None = None, category: str | None = None) -> bool:
-        """Partially update a fact; omitted content/tags retain their existing values."""
+                    tags: str | None = None, category: str | None = None, ttl_days: int | None = None) -> bool:
+        """Partially update a fact; omitted content/tags retain their existing values.
+        ttl_days: None = leave unchanged (NOT a clear — 0 is the explicit clear, restoring
+        tag-derived/global decay)."""
         with self._lock:
             row = self._one("SELECT fact_id, content, tags, category, trust_score FROM facts WHERE fact_id = ?", (fact_id,))
             if row is None:
@@ -217,6 +220,8 @@ class MemoryStore:
                 "trust_score": _clamp_trust(row["trust_score"] + trust_delta) if trust_delta is not None else None,
             }
             changes = {col: val for col, val in changes.items() if val is not None}
+            if ttl_days is not None:  # added after the None-filter: 0 is a valid explicit clear
+                changes["ttl_days"] = int(ttl_days)
             assignments = ", ".join(["updated_at = CURRENT_TIMESTAMP"] + [f"{col} = ?" for col in changes])
             self._write(f"UPDATE facts SET {assignments} WHERE fact_id = ?", [*changes.values(), fact_id])
             if content is not None:
@@ -246,7 +251,7 @@ class MemoryStore:
         if fact_id == by_fact_id:
             raise ValueError("a fact cannot supersede itself")
         with self._lock:
-            old = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (fact_id,))
+            old = self._one("SELECT fact_id, category, superseded_by FROM facts WHERE fact_id = ?", (fact_id,))
             new = self._one("SELECT fact_id, superseded_by FROM facts WHERE fact_id = ?", (by_fact_id,))
             if old is None or new is None:
                 raise ValueError(f"unknown fact_id: {fact_id if old is None else by_fact_id}")
@@ -259,6 +264,9 @@ class MemoryStore:
                 valid_until = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             self._write("UPDATE facts SET valid_until = ?, superseded_by = ?, superseded_reason = ? WHERE fact_id = ?",
                         (valid_until, by_fact_id, reason or "", fact_id))
+            # The retired fact's vector must leave its category bank (probe ranks against it);
+            # _rebuild_bank skips superseded rows, so a rebuild drops it from the bundle.
+            self._rebuild_bank(old["category"])
             return True
 
     def timeline(self, fact_id: int) -> dict:
@@ -365,11 +373,14 @@ class MemoryStore:
         self._write("UPDATE facts SET hrr_vector = ? WHERE fact_id = ?", (blob, fact_id))
 
     def _rebuild_bank(self, category: str) -> None:
-        """Full rebuild of a category's memory bank from all its fact vectors."""
+        """Full rebuild of a category's memory bank from all its LIVE fact vectors
+        (superseded rows are excluded — a retired snapshot must not steer probe ranking)."""
         if not self._hrr_available:
             return
         bank_name = f"cat:{category}"
-        rows = self._conn.execute("SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL", (category,)).fetchall()
+        rows = self._conn.execute(
+            "SELECT hrr_vector FROM facts WHERE category = ? AND hrr_vector IS NOT NULL AND superseded_by IS NULL",
+            (category,)).fetchall()
         if not rows:
             self._write("DELETE FROM memory_banks WHERE bank_name = ?", (bank_name,))
             return

@@ -106,7 +106,7 @@ hermes plugins enable holographic-zh
 写事实时在 tags 里带时效等级：`T0` 事件型（永不失效，如清退/裁定/会晤结论）、`T1` 结构型（工具命令/表结构/口径，不衰减）、`T2` 慢变（组织人事/账期/供应格局）、`T3` 快变（行情/产能/价格快照）。配合 `ttl_map` 配置后：
 
 - 衰减只降排序权重，**不删除**——过时事实仍可检索，只是不再顶替新快照注入
-- `facts.ttl_days` 列可对单条事实显式覆盖（如某条 T3 状态约定 7 天有效期）
+- `facts.ttl_days` 可对单条事实显式覆盖：工具层 `fact_store(action='add', ttl_days=7)` 或 `action='update', ttl_days=0`（0 = 清除覆盖、回到标签推导）；优先级 = ttl_days > tags T 级 > 全局兜底
 - 事件/状态混合的事实建议拆两条：事件型记录事实、状态型记录当前快照（新快照 add 不覆盖，形成时间线）
 
 ### 版本链：supersede / timeline（0.3.0）

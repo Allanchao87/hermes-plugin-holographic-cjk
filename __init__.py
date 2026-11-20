@@ -53,6 +53,7 @@ FACT_STORE_SCHEMA = {
             "valid_until": {"type": "string", "description": "Real-world end of truth for 'supersede' (ISO datetime; default: now UTC)."},
             "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
             "tags": {"type": "string", "description": "Comma-separated tags."},
+            "ttl_days": {"type": "integer", "description": "Explicit decay half-life in days for 'add'/'update' (overrides the tag-derived level; 0 on 'update' clears the override). Omit to derive from a T-level tag (T0/T1/T2/T3) via the configured ttl_map."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
             "limit": {"type": "integer", "description": "Max results (default: 10)."},
@@ -234,7 +235,8 @@ class HolographicMemoryProvider(MemoryProvider):
     _TOOL_HANDLERS = {
         "fact_store": _tool_handler({
             "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
-                a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
+                a["content"], category=a.get("category", "general"), tags=a.get("tags", ""),
+                ttl_days=int(a["ttl_days"]) if "ttl_days" in a else None), "status": "added"}),
             "search": lambda self, a: _results(self._retriever.search(
                 a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
             "probe": lambda self, a: self._entity_query("probe", a),
@@ -248,7 +250,8 @@ class HolographicMemoryProvider(MemoryProvider):
             "timeline": lambda self, a: json.dumps(self._store.timeline(int(a["fact_id"])), ensure_ascii=False),
             "update": lambda self, a: json.dumps({"updated": self._store.update_fact(
                 int(a["fact_id"]), content=a.get("content"), trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
-                tags=a.get("tags"), category=a.get("category"))}),
+                tags=a.get("tags"), category=a.get("category"),
+                ttl_days=int(a["ttl_days"]) if "ttl_days" in a else None)}),
             "remove": lambda self, a: json.dumps({"removed": self._store.remove_fact(int(a["fact_id"]))}),
             "list": lambda self, a: _results(self._store.list_facts(
                 category=a.get("category"), min_trust=float(a.get("min_trust", 0.0)), limit=_limit(a)), key="facts"),

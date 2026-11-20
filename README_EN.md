@@ -106,7 +106,7 @@ The `plugins.hermes-memory-store` section of `$HERMES_HOME/config.yaml`:
 Tag facts with a temporal level when writing them: `T0` event (never expires — exits, rulings, meeting outcomes), `T1` structural (tool commands, table schemas, conventions), `T2` slow-moving (org charts, payment terms, supply landscape), `T3` fast-moving (market conditions, capacity, price snapshots). With `ttl_map` configured:
 
 - decay only lowers ranking weight, it **never deletes** — stale facts stay retrievable, they just stop outranking fresh snapshots
-- the `facts.ttl_days` column overrides the tag-derived half-life per row (e.g. a T3 status valid for exactly 7 days)
+- `facts.ttl_days` overrides the tag-derived half-life per row: `fact_store(action='add', ttl_days=7)` or `action='update', ttl_days=0` (0 clears the override back to tag-derived). Priority: ttl_days > T-level tag > global fallback
 - for mixed event/state facts, split into two: the event (T0) records what happened, the state (T3) snapshots the current picture; add new snapshots instead of overwriting to build a timeline
 
 ### Version chains: supersede / timeline (0.3.0)
